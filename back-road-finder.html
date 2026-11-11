@@ -66,6 +66,7 @@ button{font:inherit;cursor:pointer;border-radius:8px}
 .steps li{margin-bottom:4px}
 .steps span{color:var(--muted)}
 .note{font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:12px;margin:0}
+#map.dim .leaflet-tile-pane{filter:brightness(.75) contrast(1.05)}
 .pin{width:26px;height:26px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.4)}
 .pin.a{background:#0b7a5c}.pin.b{background:#b3261e}
 @media (max-width:760px){
@@ -136,10 +137,11 @@ if(!window.L){ $('msg').className='msg err'; $('msg').textContent='The map could
 
 var dark=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;
 var map=L.map('map',{zoomControl:true}).setView([26.12,-80.2],10);
-L.tileLayer('https://{s}.basemaps.cartocdn.com/'+(dark?'dark_all':'rastertiles/voyager')+'/{z}/{x}/{y}{r}.png',{
-  maxZoom:19,subdomains:'abcd',
-  attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{
+  maxZoom:19,
+  attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 }).addTo(map);
+if(dark) document.getElementById('map').classList.add('dim');
 
 /* ---------- helpers ---------- */
 function say(text,err){ var m=$('msg'); m.textContent=text; m.className=err?'msg err':'msg'; m.hidden=!text; }
