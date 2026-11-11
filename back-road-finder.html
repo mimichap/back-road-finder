@@ -107,8 +107,8 @@ button{font:inherit;cursor:pointer;border-radius:8px}
         <label for="extra">Extra time I'll accept</label>
         <select id="extra">
           <option value="5">5 min</option>
-          <option value="10" selected>10 min</option>
-          <option value="20">20 min</option>
+          <option value="10">10 min</option>
+          <option value="20" selected>20 min</option>
           <option value="9999">No limit</option>
         </select>
       </div>
@@ -245,12 +245,12 @@ function osrm(points,extra){
   return getJSON(OSRM+path+'?overview=full&geometries=geojson&steps=true'+extra)
     .then(function(d){ return d.code==='Ok'?d.routes:[]; });
 }
-function viaPoint(a,b,side){
-  var r=Math.PI/180, midLat=(a.lat+b.lat)/2, midLng=(a.lng+b.lng)/2;
-  var mx=111320*Math.cos(midLat*r), my=110540;
+function viaPoint(a,b,side,t,f){
+  var r=Math.PI/180, bLat=a.lat+(b.lat-a.lat)*t, bLng=a.lng+(b.lng-a.lng)*t;
+  var mx=111320*Math.cos(bLat*r), my=110540;
   var dx=(b.lng-a.lng)*mx, dy=(b.lat-a.lat)*my, len=Math.sqrt(dx*dx+dy*dy)||1;
-  var off=Math.min(8000,Math.max(600,len*0.2))*side;
-  return {lat:midLat+(dx/len*off)/my, lng:midLng+(-dy/len*off)/mx};
+  var off=Math.min(10000,Math.max(500,len*f))*side;
+  return {lat:bLat+(dx/len*off)/my, lng:bLng+(-dy/len*off)/mx};
 }
 function sample(coords,stepM){
   var out=[coords[0]], acc=0;
@@ -261,22 +261,64 @@ function sample(coords,stepM){
   }
   out.push(coords[coords.length-1]); return out;
 }
+var MAIN_RE=/^(I|US|FL|SR|CR|[A-Z]{2})[ -]?\d+/;
+function build(coords,steps,distance,duration,kind,uturn){
+  var main=0, hwy=0, byName={};
+  steps.forEach(function(s){
+    if(s.main) main+=s.distance;
+    if(s.hwy) hwy+=s.distance;
+    if(s.name) byName[s.name]=(byName[s.name]||0)+s.distance;
+  });
+  var top=Object.keys(byName).sort(function(x,y){ return byName[y]-byName[x]; }).slice(0,2);
+  var cells={}; sample(coords,150).forEach(function(p){ cells[Math.round(p[0]/0.002)+':'+Math.round(p[1]/0.002)]=1; });
+  return {coords:coords,steps:steps.filter(function(s){ return s.text; }),distance:distance,duration:duration,kind:kind,uturn:uturn,
+    quiet:distance?Math.min(1,Math.max(0,1-main/distance)):0, hwy:hwy, cells:cells,
+    name:top.length?'Via '+top.join(' and '):'Unnamed roads'};
+}
 function digest(raw,kind){
   var coords=raw.geometry.coordinates.map(function(c){ return [c[1],c[0]]; });
-  var steps=[]; raw.legs.forEach(function(l){ steps=steps.concat(l.steps); });
-  var main=0, hwy=0, byName={}, uturn=false;
-  steps.forEach(function(s,i){
+  var src=[]; raw.legs.forEach(function(l){ src=src.concat(l.steps); });
+  var uturn=false;
+  var steps=src.map(function(s,i){
     var isHwy=(s.intersections||[]).some(function(x){ return x.classes&&x.classes.indexOf('motorway')>=0; });
-    if(s.ref||isHwy) main+=s.distance;
-    if(isHwy) hwy+=s.distance;
-    var n=s.name||s.ref; if(n) byName[n]=(byName[n]||0)+s.distance;
     if(s.maneuver&&s.maneuver.modifier==='uturn'&&i>0) uturn=true;
+    return {name:s.name||s.ref||'',distance:s.distance,main:!!(s.ref||isHwy),hwy:isHwy,text:stepText(s,i===0,i===src.length-1)};
   });
-  var top=Object.keys(byName).sort(function(a,b){ return byName[b]-byName[a]; }).slice(0,2);
-  var cells={}; sample(coords,150).forEach(function(p){ cells[Math.round(p[0]/0.002)+':'+Math.round(p[1]/0.002)]=1; });
-  return {coords:coords,steps:steps,distance:raw.distance,duration:raw.duration,kind:kind,uturn:uturn,
-    quiet:raw.distance?Math.max(0,1-main/raw.distance):0, hwy:hwy, cells:cells,
-    name:top.length?'Via '+top.join(' and '):'Unnamed roads'};
+  return build(coords,steps,raw.distance,raw.duration,kind,uturn);
+}
+/* second route source (Valhalla): real alternates, with and without highways */
+function decode6(str){
+  var i=0,lat=0,lng=0,out=[];
+  while(i<str.length){
+    var b,shift=0,res=0;
+    do{ b=str.charCodeAt(i++)-63; res|=(b&31)<<shift; shift+=5; }while(b>=32);
+    lat+=(res&1)?~(res>>1):(res>>1);
+    shift=0; res=0;
+    do{ b=str.charCodeAt(i++)-63; res|=(b&31)<<shift; shift+=5; }while(b>=32);
+    lng+=(res&1)?~(res>>1):(res>>1);
+    out.push([lat/1e6,lng/1e6]);
+  }
+  return out;
+}
+function digestV(trip){
+  var coords=[], steps=[];
+  trip.legs.forEach(function(l){
+    coords=coords.concat(decode6(l.shape));
+    (l.maneuvers||[]).forEach(function(m){
+      var n=(m.street_names&&m.street_names[0])||'';
+      steps.push({name:n,distance:(m.length||0)*1609.344,main:!!m.highway||MAIN_RE.test(n),hwy:!!m.highway,text:m.instruction||''});
+    });
+  });
+  return build(coords,steps,trip.summary.length*1609.344,trip.summary.time,'alt',false);
+}
+function valhalla(a,b,noHwy){
+  var req={locations:[{lat:a.lat,lon:a.lng},{lat:b.lat,lon:b.lng}],costing:'auto',alternates:3,units:'miles'};
+  if(noHwy) req.costing_options={auto:{use_highways:0,use_tolls:0}};
+  return getJSON('https://valhalla1.openstreetmap.de/route?json='+encodeURIComponent(JSON.stringify(req)))
+    .then(function(d){
+      var trips=[d.trip].concat((d.alternates||[]).map(function(x){ return x.trip; }));
+      return trips.filter(Boolean).map(digestV);
+    }).catch(function(){ return []; });
 }
 function overlap(a,b){
   var ka=Object.keys(a.cells), kb=Object.keys(b.cells), n=0;
@@ -299,18 +341,25 @@ function findRoutes(){
   need('from').then(function(){ return need('to'); }).then(function(){
     var a=pts.from, b=pts.to, far=hav([a.lat,a.lng],[b.lat,b.lng])>800;
     var safe=function(p){ return p.catch(function(){ return []; }); };
-    var jobs=[ osrm([a,b],'&alternatives=3'), safe(osrm([a,b],'&alternatives=3&exclude=motorway')) ];
-    if(far){ [1,-1].forEach(function(side){
-      var v=viaPoint(a,b,side);
-      jobs.push(safe(osrm([a,v,b],'&exclude=motorway').then(function(r){ return r.length?r:osrm([a,v,b],''); })));
-    }); }
-    return Promise.all(jobs);
-  }).then(function(sets){
-    if(!sets[0].length) throw new Error('No driving route was found between those two places.');
-    var all=[];
-    sets.forEach(function(set,i){ set.forEach(function(r,j){ all.push(digest(r,i===0&&j===0?'usual':(i>=2?'via':'alt'))); }); });
+    var via=function(v){
+      return osrm([a,v,b],'&continue_straight=true&exclude=motorway').catch(function(){ return []; })
+        .then(function(r){ return r.length?r:osrm([a,v,b],'&continue_straight=true'); }).catch(function(){ return []; });
+    };
+    var main=osrm([a,b],'&alternatives=3');
+    var extra=[ safe(osrm([a,b],'&alternatives=3&exclude=motorway')).then(function(set){ return set.map(function(r){ return digest(r,'alt'); }); }),
+                valhalla(a,b,true), valhalla(a,b,false) ];
+    if(far){
+      [[0.5,0.12],[0.5,0.25],[0.3,0.15],[0.7,0.15]].forEach(function(c){ [1,-1].forEach(function(side){
+        extra.push(via(viaPoint(a,b,side,c[0],c[1])).then(function(set){ return set.map(function(r){ return digest(r,'via'); }); }));
+      }); });
+    }
+    return Promise.all([main,Promise.all(extra.map(safe))]);
+  }).then(function(res){
+    if(!res[0].length) throw new Error('No driving route was found between those two places.');
+    var all=res[0].map(function(r,j){ return digest(r,j===0?'usual':'alt'); });
+    res[1].forEach(function(set){ all=all.concat(set); });
     var usual=all[0], fastest=all.reduce(function(m,r){ return r.duration<m.duration?r:m; },usual);
-    var rest=all.slice(1).filter(function(r){ return !(r.kind==='via'&&(r.uturn||r.duration>fastest.duration*1.6+300)); })
+    var rest=all.slice(1).filter(function(r){ return !r.uturn&&r.duration<=fastest.duration*1.6+300; })
       .sort(function(x,y){ return y.quiet-x.quiet||x.duration-y.duration; });
     var kept=[usual];
     rest.forEach(function(r){ if(kept.length<6&&!kept.some(function(k){ return overlap(k,r)>0.8; })) kept.push(r); });
@@ -381,9 +430,8 @@ function render(){
       '<div class="acts"><button type="button" data-act="steps">'+(openSteps[x.i]?'Hide directions':'Show directions')+'</button>'+
       '<a href="'+gmaps(r)+'" target="_blank" rel="noopener">Open in Google Maps</a></div>';
     if(openSteps[x.i]){
-      html+='<ol class="steps">'+r.steps.map(function(s,k){
-        var t=stepText(s,k===0,k===r.steps.length-1);
-        return t?'<li>'+esc(t)+(s.distance>15?' <span>· '+miles(s.distance)+'</span>':'')+'</li>':'';
+      html+='<ol class="steps">'+r.steps.map(function(s){
+        return '<li>'+esc(s.text)+(s.distance>15?' <span>· '+miles(s.distance)+'</span>':'')+'</li>';
       }).join('')+'</ol>';
     }
     el.innerHTML=html;
